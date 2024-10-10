@@ -9,7 +9,7 @@ options(pillar.print_max = 100)
 # Import MSigDB gene sets -----
 
 # Define MSigDB download variables
-mdb_version <- "2023.2.Hs"
+mdb_version <- "2024.2.Hs"
 mdb_db <- str_glue("msigdb_v{mdb_version}.db")
 mdb_db_zip <- str_glue("{mdb_db}.zip")
 mdb_url_base <- "https://data.broadinstitute.org/gsea-msigdb/msigdb"
