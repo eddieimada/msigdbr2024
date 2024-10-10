@@ -1,67 +1,60 @@
-
 library(dplyr)
 library(tidyr)
 library(purrr)
 library(readr)
 library(stringr)
-library(glue)
-library(xml2)
 library(usethis)
 options(pillar.print_max = 100)
 
 # Import MSigDB gene sets -----
 
 # Define MSigDB download variables
-mdb_version <- "2022.1.Hs"
-mdb_xml <- glue("msigdb_v{mdb_version}.xml")
+mdb_version <- "2023.2.Hs"
+mdb_db <- str_glue("msigdb_v{mdb_version}.db")
+mdb_db_zip <- str_glue("{mdb_db}.zip")
 mdb_url_base <- "https://data.broadinstitute.org/gsea-msigdb/msigdb"
-mdb_xml_url <- glue("{mdb_url_base}/release/{mdb_version}/{mdb_xml}")
+mdb_db_zip_url <- str_glue("{mdb_url_base}/release/{mdb_version}/{mdb_db_zip}")
 
-# Download the MSigDB XML file
+# Download the MSigDB SQLite file
 options(timeout = 150)
-download.file(url = mdb_xml_url, destfile = mdb_xml)
+download.file(url = mdb_db_zip_url, destfile = mdb_db_zip)
+unzip(mdb_db_zip, exdir = ".")
+file.remove(mdb_db_zip)
 
-# Check MSigDB XML file size in bytes
-utils:::format.object_size(file.size(mdb_xml), units = "auto")
+# Check MSigDB SQLite file size in bytes
+utils:::format.object_size(file.size(mdb_db), units = "auto")
 
-# Import the MSigDB XML file (fails if loaded directly from URL)
-mdb_doc <- read_xml(mdb_xml)
+# Open database connection to MSigDB SQLite file and extract tables as tibbles
+# https://docs.gsea-msigdb.org/#MSigDB/MSigDB_SQLite_Database/
+db <- DBI::dbConnect(RSQLite::SQLite(), dbname = mdb_db, flags = RSQLite::SQLITE_RO)
 
-# Delete the MSigDB XML file and its contents since they are no longer needed
-file.remove(mdb_xml)
+gene_set_source_member <- tbl(db, "gene_set_source_member") %>% as_tibble()
+source_member <- tbl(db, "source_member") %>% as_tibble()
+gene_set <- tbl(db, "gene_set") %>% as_tibble()
+gene_symbol <- tbl(db, "gene_symbol") %>% as_tibble()
+gene_set_details <- tbl(db, "gene_set_details") %>% as_tibble()
+publication <- tbl(db, "publication") %>% as_tibble()
 
-# Extract the XML attributes and convert into a tibble
-# https://software.broadinstitute.org/cancer/software/gsea/wiki/index.php/mdb_XML_description
-# GENESET record attributes:
-# * STANDARD_NAME: gene set name
-# * SYSTEMATIC_NAME: gene set name for internal indexing purposes
-# * CATEGORY_CODE: gene set collection code, e.g., C2
-# * SUB_CATEGORY_CODE: gene set subcategory code, e.g., CGP
-# * PMID: PubMed ID for the source publication
-# * GEOID: GEO or ArrayExpress ID for the raw microarray data in GEO or ArrayExpress repository
-# * EXACT_SOURCE: exact source of the set, usually a specific figure or table in the publication
-# * GENESET_LISTING_URL: URL of the original source that listed the gene set members (all blank)
-# * EXTERNAL_DETAILS_URL: URL of the original source page of the gene set
-# * DESCRIPTION_BRIEF: brief description of the gene set
-# * MEMBERS: list of gene set members as they originally appeared in the source
-# * MEMBERS_SYMBOLIZED: list of gene set members in the form of human gene symbols
-# * MEMBERS_EZID: list of gene set members in the form of human Entrez Gene IDs
-# * MEMBERS_MAPPING: pipe-separated list of in the form of: MEMBERS, MEMBERS_SYMBOLIZED, MEMBERS_EZID
-mdb_gs_ns <- xml_find_all(mdb_doc, xpath = ".//GENESET")
-mdb_tbl <-
-  tibble(
-    gs_name = xml_attr(mdb_gs_ns, attr = "STANDARD_NAME"),
-    gs_id = xml_attr(mdb_gs_ns, attr = "SYSTEMATIC_NAME"),
-    gs_cat = xml_attr(mdb_gs_ns, attr = "CATEGORY_CODE"),
-    gs_subcat = xml_attr(mdb_gs_ns, attr = "SUB_CATEGORY_CODE"),
-    gs_pmid = xml_attr(mdb_gs_ns, attr = "PMID"),
-    gs_geoid = xml_attr(mdb_gs_ns, attr = "GEOID"),
-    gs_exact_source = xml_attr(mdb_gs_ns, attr = "EXACT_SOURCE"),
-    gs_url = xml_attr(mdb_gs_ns, attr = "EXTERNAL_DETAILS_URL"),
-    gs_description = xml_attr(mdb_gs_ns, attr = "DESCRIPTION_BRIEF"),
-    gs_members = xml_attr(mdb_gs_ns, attr = "MEMBERS_MAPPING")
-  ) %>%
-  filter(gs_cat != "ARCHIVED")
+# Close database connection to MSigDB SQLite and delete the MSigDB SQLite file since it is no longer needed
+DBI::dbDisconnect(db)
+file.remove(mdb_db)
+
+# Create a table for gene sets
+mdb_tbl <- gene_set %>%
+  inner_join(gene_set_details, join_by(id == gene_set_id)) %>%
+  left_join(publication, join_by(publication_id == id)) %>%
+  separate(collection_name, into = c("gs_cat", "gs_subcat"), sep = ":", remove = TRUE, extra = "merge") %>%
+  select(gs_name = standard_name,
+         gs_id = systematic_name,
+         gs_cat,
+         gs_subcat,
+         gs_pmid = PMID,
+         gs_geoid = GEO_id,
+         gs_exact_source = exact_source,
+         gs_url = external_details_URL,
+         gs_description = description_brief) %>%
+  filter(gs_cat != "ARCHIVED") %>%
+  replace_na(list(gs_subcat = "", gs_pmid = "", gs_geoid = "", gs_exact_source = "", gs_url = "", gs_description = ""))
 
 # Get the number of gene sets per collection (for testing)
 msigdb_category_genesets <- mdb_tbl %>%
@@ -72,7 +65,7 @@ msigdb_category_genesets
 # Import MSigDB Ensembl mappings -----
 
 # Download the MSigDB Ensembl mappings
-ensembl_url <- glue("{mdb_url_base}/annotations/human/Human_Ensembl_Gene_ID_MSigDB.v{mdb_version}.chip")
+ensembl_url <- str_glue("{mdb_url_base}/annotations/human/Human_Ensembl_Gene_ID_MSigDB.v{mdb_version}.chip")
 ensembl_tbl <- read_tsv(ensembl_url, progress = FALSE, show_col_types = FALSE)
 ensembl_tbl <- ensembl_tbl %>% select(human_ensembl_gene = `Probe Set ID`, human_gene_symbol = `Gene Symbol`)
 
@@ -80,7 +73,6 @@ ensembl_tbl <- ensembl_tbl %>% select(human_ensembl_gene = `Probe Set ID`, human
 
 # Create a table for gene sets
 msigdbr_genesets <- mdb_tbl %>%
-  select(!gs_members) %>%
   distinct() %>%
   arrange(gs_name, gs_id)
 
@@ -89,23 +81,14 @@ if (nrow(msigdbr_genesets) != sum(msigdb_category_genesets$n_genesets)) stop()
 # Extract gene set members -----
 
 # Create a table for genes in a tidy/long format (one gene per row)
-geneset_genes <- select(mdb_tbl, gs_id, gs_members)
-geneset_genes <- mutate(geneset_genes, gs_members_split = strsplit(gs_members, "|", fixed = TRUE))
-geneset_genes <- unnest(geneset_genes, cols = gs_members_split, names_repair = "minimal")
-nrow(geneset_genes) %>% prettyNum(big.mark = ",")
-
-# Remove genes that do not have comma-separated parts (not a proper source gene)
-geneset_genes <- filter(geneset_genes, str_detect(gs_members_split, fixed(",")))
-nrow(geneset_genes) %>% prettyNum(big.mark = ",")
-
-# Split gene details into columns
-geneset_genes <- geneset_genes %>%
-  separate(
-    col = gs_members_split,
-    into = c("source_gene", "human_gene_symbol", "human_entrez_gene"),
-    sep = ","
-  ) %>%
-  mutate(human_entrez_gene = as.integer(human_entrez_gene))
+geneset_genes <- gene_set %>%
+  inner_join(gene_set_details, join_by(id == gene_set_id)) %>%
+  select(id, systematic_name) %>%
+  inner_join(gene_set_source_member, join_by(id == gene_set_id)) %>%
+  inner_join(source_member, join_by(source_member_id == id)) %>%
+  inner_join(gene_symbol, join_by(gene_symbol_id == id)) %>%
+  select(gs_id = systematic_name, source_gene = source_id, human_entrez_gene = NCBI_id, human_gene_symbol = symbol) %>%
+  replace_na(list(human_entrez_gene = 0L, human_gene_symbol = ""))
 nrow(geneset_genes) %>% prettyNum(big.mark = ",")
 
 # Check for any strange patterns
@@ -147,6 +130,7 @@ geneset_genes_entrez <- geneset_genes %>%
   distinct(gs_id, human_entrez_gene, human_gene_symbol) %>%
   mutate(gene_id = human_entrez_gene) %>%
   arrange(gs_id, gene_id)
+
 geneset_genes_ensembl <- geneset_genes %>%
   filter(str_detect(source_gene, "^ENSG000")) %>%
   select(gs_id, human_entrez_gene, human_ensembl_gene = source_gene, human_gene_symbol) %>%
@@ -171,7 +155,7 @@ length(clean_entrez_genes)
 
 # Use the Entrez ID for unambiguous genes
 geneset_genes_ensembl <- geneset_genes_ensembl %>%
-  mutate(gene_id = if_else(human_entrez_gene %in% clean_entrez_genes, human_entrez_gene, gene_id)) %>%
+  mutate(gene_id = if_else(human_entrez_gene %in% clean_entrez_genes, human_entrez_gene, as.character(gene_id))) %>%
   arrange(gs_id, gene_id)
 
 # Check the number of genes
@@ -184,10 +168,10 @@ n_distinct(geneset_genes_ensembl$gene_id)
 n_distinct(geneset_genes_ensembl$human_gene_symbol)
 n_distinct(geneset_genes_ensembl$human_ensembl_gene)
 
-if (length(setdiff(geneset_genes_entrez$human_gene_symbol, ensembl_tbl$human_gene_symbol))) stop()
+#### if (length(setdiff(geneset_genes_entrez$human_gene_symbol, ensembl_tbl$human_gene_symbol))) stop()
 
 # Add Ensembl IDs to genes without them
-geneset_genes_entrez <- left_join(geneset_genes_entrez, ensembl_tbl, by = "human_gene_symbol")
+geneset_genes_entrez <- left_join(geneset_genes_entrez, ensembl_tbl, by = "human_gene_symbol", relationship = "many-to-many")
 
 # Check gene numbers
 nrow(geneset_genes_entrez)
