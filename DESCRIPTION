@@ -1,5 +1,5 @@
 Type: Package
-Package: msigdbr
+Package: msigdbrUpdated
 Title: MSigDB Gene Sets for Multiple Organisms in a Tidy Data Format
 Version: 7.5.1.9001
 Authors@R: 
